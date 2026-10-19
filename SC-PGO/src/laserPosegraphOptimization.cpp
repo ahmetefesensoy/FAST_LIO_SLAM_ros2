@@ -34,7 +34,7 @@
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/convert.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -65,6 +65,7 @@
 #include "scancontext/Scancontext.h"
 #include "pgo/factors.hpp"
 #include "pgo/measurement_utils.hpp"
+#include "pgo/transforms.hpp"
 
 using namespace gtsam;
 
@@ -146,6 +147,12 @@ double headingMahalanobisThreshold = 9.0;
 double antennaYawOffset = 0.0;
 double meridianConvergence = 0.0;
 bool headingIsNorthClockwise = false;
+gtsam::Point3 antennaInBase(0.0, 0.0, 0.0);
+bool initializeFromAbsoluteMeasurements = true;
+bool publishMapToOdom = true;
+std::string mapFrame = "map";
+std::string odomFrame = "odom";
+std::string baseFrame = "base_link";
 nav_msgs::msg::Odometry::ConstSharedPtr currGnss;
 geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr currHeading;
 bool hasGnssForThisKF = false;
@@ -359,7 +366,8 @@ void pubPath( void )
     // pub odom and path 
     nav_msgs::msg::Odometry odomAftPGO;
     nav_msgs::msg::Path pathAftPGO;
-    pathAftPGO.header.frame_id = "camera_init";
+    pathAftPGO.header.frame_id = mapFrame;
+    std::optional<gtsam::Pose3> map_T_odom;
     mKF.lock(); 
     // for (int node_idx=0; node_idx < int(keyframePosesUpdated.size()) - 1; node_idx++) // -1 is just delayed visualization (because sometimes mutexed while adding(push_back) a new one)
     for (int node_idx=0; node_idx < recentIdxUpdated; node_idx++) // -1 is just delayed visualization (because sometimes mutexed while adding(push_back) a new one)
@@ -368,9 +376,10 @@ void pubPath( void )
         // const gtsam::Pose3& pose_est = isamCurrentEstimate.at<gtsam::Pose3>(node_idx);
 
         nav_msgs::msg::Odometry odomAftPGOthis;
-        odomAftPGOthis.header.frame_id = "camera_init";
-        odomAftPGOthis.child_frame_id = "/aft_pgo";
-        odomAftPGOthis.header.stamp = rclcpp::Time(keyframeTimes.at(node_idx) * 10e9);
+        odomAftPGOthis.header.frame_id = mapFrame;
+        odomAftPGOthis.child_frame_id = baseFrame;
+        odomAftPGOthis.header.stamp = rclcpp::Time(
+            static_cast<int64_t>(keyframeTimes.at(node_idx) * 1e9));
         odomAftPGOthis.pose.pose.position.x = pose_est.x;
         odomAftPGOthis.pose.pose.position.y = pose_est.y;
         odomAftPGOthis.pose.pose.position.z = pose_est.z;
@@ -386,33 +395,39 @@ void pubPath( void )
         poseStampAftPGO.pose = odomAftPGOthis.pose.pose;
 
         pathAftPGO.header.stamp = odomAftPGOthis.header.stamp;
-        pathAftPGO.header.frame_id = "camera_init";
+        pathAftPGO.header.frame_id = mapFrame;
         pathAftPGO.poses.push_back(poseStampAftPGO);
+    }
+    if (recentIdxUpdated >= 0 &&
+        recentIdxUpdated < static_cast<int>(keyframePoses.size()) &&
+        recentIdxUpdated < static_cast<int>(keyframePosesUpdated.size())) {
+        map_T_odom = pgo::mapToOdom(
+            Pose6DtoGTSAMPose3(keyframePosesUpdated.at(recentIdxUpdated)),
+            Pose6DtoGTSAMPose3(keyframePoses.at(recentIdxUpdated)));
     }
     mKF.unlock(); 
     pubOdomAftPGO->publish(odomAftPGO); // last pose 
     pubPathAftPGO->publish(pathAftPGO); // poses 
 
-    static std::unique_ptr<tf2_ros::TransformBroadcaster> br = std::make_unique<tf2_ros::TransformBroadcaster>(node);
-    // tf::Transform transform;
+    if (!publishMapToOdom || !map_T_odom) {
+        return;
+    }
+
+    static std::unique_ptr<tf2_ros::TransformBroadcaster> br =
+        std::make_unique<tf2_ros::TransformBroadcaster>(node);
     geometry_msgs::msg::TransformStamped transform;
-    transform.header.stamp = odomAftPGO.header.stamp;
-    transform.header.frame_id = "camera_init";
-    transform.child_frame_id = "/aft_pgo";
-    // transform.setOrigin(tf::Vector3(odomAftPGO.pose.pose.position.x, odomAftPGO.pose.pose.position.y, odomAftPGO.pose.pose.position.z));
-    transform.transform.translation.x = odomAftPGO.pose.pose.position.x;
-    transform.transform.translation.y = odomAftPGO.pose.pose.position.y;
-    transform.transform.translation.z = odomAftPGO.pose.pose.position.z;
-    // tf::Quaternion q;
-    // q.setW(odomAftPGO.pose.pose.orientation.w);
-    // q.setX(odomAftPGO.pose.pose.orientation.x);
-    // q.setY(odomAftPGO.pose.pose.orientation.y);
-    // q.setZ(odomAftPGO.pose.pose.orientation.z);
-    // transform.setRotation(q);
-    transform.transform.rotation.x = odomAftPGO.pose.pose.orientation.x;
-    transform.transform.rotation.y = odomAftPGO.pose.pose.orientation.y;
-    transform.transform.rotation.z = odomAftPGO.pose.pose.orientation.z;
-    transform.transform.rotation.w = odomAftPGO.pose.pose.orientation.w;
+    transform.header.stamp = node->now();
+    transform.header.frame_id = mapFrame;
+    transform.child_frame_id = odomFrame;
+    transform.transform.translation.x = map_T_odom->translation().x();
+    transform.transform.translation.y = map_T_odom->translation().y();
+    transform.transform.translation.z = map_T_odom->translation().z();
+    tf2::Quaternion q;
+    q.setRPY(
+        map_T_odom->rotation().roll(),
+        map_T_odom->rotation().pitch(),
+        map_T_odom->rotation().yaw());
+    transform.transform.rotation = tf2::toMsg(q);
     br->sendTransform(transform);
 } // pubPath
 
@@ -517,12 +532,12 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
     // loop verification 
     sensor_msgs::msg::PointCloud2 cureKeyframeCloudMsg;
     pcl::toROSMsg(*cureKeyframeCloud, cureKeyframeCloudMsg);
-    cureKeyframeCloudMsg.header.frame_id = "camera_init";
+    cureKeyframeCloudMsg.header.frame_id = mapFrame;
     pubLoopScanLocal->publish(cureKeyframeCloudMsg);
 
     sensor_msgs::msg::PointCloud2 targetKeyframeCloudMsg;
     pcl::toROSMsg(*targetKeyframeCloud, targetKeyframeCloudMsg);
-    targetKeyframeCloudMsg.header.frame_id = "camera_init";
+    targetKeyframeCloudMsg.header.frame_id = mapFrame;
     pubLoopSubmapLocal->publish(targetKeyframeCloudMsg);
 
     // ICP Settings
@@ -650,6 +665,38 @@ void process_pg()
             if( ! gtSAMgraphMade /* prior node */) {
                 const int init_node_idx = 0; 
                 gtsam::Pose3 poseOrigin = Pose6DtoGTSAMPose3(keyframePoses.at(init_node_idx));
+                if (initializeFromAbsoluteMeasurements) {
+                    std::optional<gtsam::Point2> initialGnss;
+                    if (hasGnssForThisKF && useGnssPosition) {
+                        const auto& covariance = currGnss->pose.covariance;
+                        if (pgo::validPositionCovariance(
+                                covariance[0], covariance[1], covariance[7]) &&
+                            std::isfinite(currGnss->pose.pose.position.x) &&
+                            std::isfinite(currGnss->pose.pose.position.y)) {
+                            initialGnss = gtsam::Point2(
+                                currGnss->pose.pose.position.x,
+                                currGnss->pose.pose.position.y);
+                        }
+                    }
+                    std::optional<double> initialYaw;
+                    if (hasHeadingForThisKF && useRtkHeading &&
+                        std::isfinite(currHeading->pose.covariance[35]) &&
+                        currHeading->pose.covariance[35] > 0.0) {
+                        const auto& orientation = currHeading->pose.pose.orientation;
+                        double roll, pitch, heading;
+                        tf2::Matrix3x3(tf2::Quaternion(
+                            orientation.x, orientation.y,
+                            orientation.z, orientation.w)).getRPY(
+                                roll, pitch, heading);
+                        initialYaw = headingIsNorthClockwise
+                            ? pgo::northClockwiseHeadingToEnuYaw(
+                                  heading, antennaYawOffset, meridianConvergence)
+                            : pgo::wrapAngle(
+                                  heading + antennaYawOffset + meridianConvergence);
+                    }
+                    poseOrigin = pgo::initializeGlobalPose(
+                        poseOrigin, initialGnss, initialYaw, antennaInBase);
+                }
                 // auto poseOrigin = gtsam::Pose3(gtsam::Rot3::RzRyRx(0.0, 0.0, 0.0), gtsam::Point3(0.0, 0.0, 0.0));
 
                 mtxPosegraph.lock();
@@ -695,7 +742,8 @@ void process_pg()
                                 gtsam::noiseModel::mEstimator::Cauchy::Create(1.0),
                                 gaussian);
                             gtSAMgraph.add(pgo::PositionXYFactor(
-                                curr_node_idx, east, north, robust));
+                                curr_node_idx, east, north, robust,
+                                antennaInBase));
                             cout << "GNSS XY factor added at node " << curr_node_idx << endl;
                         } else {
                             RCLCPP_WARN(
@@ -886,7 +934,7 @@ void pubMap(void)
 
     sensor_msgs::msg::PointCloud2 laserCloudMapPGOMsg;
     pcl::toROSMsg(*laserCloudMapPGO, laserCloudMapPGOMsg);
-    laserCloudMapPGOMsg.header.frame_id = "camera_init";
+    laserCloudMapPGOMsg.header.frame_id = mapFrame;
     pubMapAftPGO->publish(laserCloudMapPGOMsg);
 }
 
@@ -973,31 +1021,63 @@ int main(int argc, char **argv)
   antennaYawOffset = node->get_parameter("antenna_yaw_offset").as_double();
   node->declare_parameter("meridian_convergence", 0.0);
   meridianConvergence = node->get_parameter("meridian_convergence").as_double();
+  node->declare_parameter("antenna_offset_x", 0.0);
+  node->declare_parameter("antenna_offset_y", 0.0);
+  node->declare_parameter("antenna_offset_z", 0.0);
+  antennaInBase = gtsam::Point3(
+      node->get_parameter("antenna_offset_x").as_double(),
+      node->get_parameter("antenna_offset_y").as_double(),
+      node->get_parameter("antenna_offset_z").as_double());
+  node->declare_parameter("initialize_from_absolute_measurements", true);
+  initializeFromAbsoluteMeasurements =
+      node->get_parameter("initialize_from_absolute_measurements").as_bool();
   node->declare_parameter("heading_is_north_clockwise", false);
   headingIsNorthClockwise =
       node->get_parameter("heading_is_north_clockwise").as_bool();
+  node->declare_parameter("publish_map_to_odom", true);
+  publishMapToOdom = node->get_parameter("publish_map_to_odom").as_bool();
+  node->declare_parameter("map_frame", "map");
+  mapFrame = node->get_parameter("map_frame").as_string();
+  node->declare_parameter("odom_frame", "odom");
+  odomFrame = node->get_parameter("odom_frame").as_string();
+  node->declare_parameter("base_frame", "base_link");
+  baseFrame = node->get_parameter("base_frame").as_string();
 
   node->declare_parameter("cloud_topic", "/cloud_registered_body");
   node->declare_parameter("odometry_topic", "/Odometry");
   node->declare_parameter("gnss_odometry_topic", "/odometry/gps");
   node->declare_parameter("rtk_heading_topic", "/rtk/heading_pose");
+  node->declare_parameter("optimized_odometry_topic", "/aft_pgo_odom");
+  node->declare_parameter("optimized_path_topic", "/aft_pgo_path");
+  node->declare_parameter("optimized_map_topic", "/aft_pgo_map");
+  node->declare_parameter("loop_scan_topic", "/loop_scan_local");
+  node->declare_parameter("loop_submap_topic", "/loop_submap_local");
   const auto cloudTopic = node->get_parameter("cloud_topic").as_string();
   const auto odometryTopic = node->get_parameter("odometry_topic").as_string();
   const auto gnssTopic = node->get_parameter("gnss_odometry_topic").as_string();
   const auto headingTopic = node->get_parameter("rtk_heading_topic").as_string();
+  const auto optimizedOdometryTopic =
+      node->get_parameter("optimized_odometry_topic").as_string();
+  const auto optimizedPathTopic =
+      node->get_parameter("optimized_path_topic").as_string();
+  const auto optimizedMapTopic =
+      node->get_parameter("optimized_map_topic").as_string();
+  const auto loopScanTopic = node->get_parameter("loop_scan_topic").as_string();
+  const auto loopSubmapTopic =
+      node->get_parameter("loop_submap_topic").as_string();
 
 	auto subLaserCloudFullRes = node->create_subscription<sensor_msgs::msg::PointCloud2>(cloudTopic, 100, laserCloudFullResHandler);
 	auto subLaserOdometry = node->create_subscription<nav_msgs::msg::Odometry>(odometryTopic, 100, laserOdometryHandler);
 	auto subGNSS = node->create_subscription<nav_msgs::msg::Odometry>(gnssTopic, 100, gnssHandler);
 	auto subHeading = node->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(headingTopic, 100, headingHandler);
 
-	pubOdomAftPGO = node->create_publisher<nav_msgs::msg::Odometry>("/aft_pgo_odom", 100);
+	pubOdomAftPGO = node->create_publisher<nav_msgs::msg::Odometry>(optimizedOdometryTopic, 100);
 	pubOdomRepubVerifier = node->create_publisher<nav_msgs::msg::Odometry>("/repub_odom", 100);
-	pubPathAftPGO = node->create_publisher<nav_msgs::msg::Path>("/aft_pgo_path", 100);
-	pubMapAftPGO = node->create_publisher<sensor_msgs::msg::PointCloud2>("/aft_pgo_map", 100);
+	pubPathAftPGO = node->create_publisher<nav_msgs::msg::Path>(optimizedPathTopic, 100);
+	pubMapAftPGO = node->create_publisher<sensor_msgs::msg::PointCloud2>(optimizedMapTopic, 100);
 
-	pubLoopScanLocal = node->create_publisher<sensor_msgs::msg::PointCloud2>("/loop_scan_local", 100);
-	pubLoopSubmapLocal = node->create_publisher<sensor_msgs::msg::PointCloud2>("/loop_submap_local", 100);
+	pubLoopScanLocal = node->create_publisher<sensor_msgs::msg::PointCloud2>(loopScanTopic, 100);
+	pubLoopSubmapLocal = node->create_publisher<sensor_msgs::msg::PointCloud2>(loopSubmapTopic, 100);
 
 	std::thread posegraph_slam {process_pg}; // pose graph construction
 	std::thread lc_detection {process_lcd}; // loop closure detection 

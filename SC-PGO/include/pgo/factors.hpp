@@ -20,25 +20,31 @@ class PositionXYFactor final : public gtsam::NoiseModelFactor1<gtsam::Pose3> {
       gtsam::Key key,
       double east,
       double north,
-      const gtsam::SharedNoiseModel& noise_model)
-      : Base(noise_model, key), east_(east), north_(north) {}
+      const gtsam::SharedNoiseModel& noise_model,
+      const gtsam::Point3& antenna_in_base = gtsam::Point3(0.0, 0.0, 0.0))
+      : Base(noise_model, key),
+        east_(east),
+        north_(north),
+        antenna_in_base_(antenna_in_base) {}
 
   gtsam::Vector evaluateError(
       const gtsam::Pose3& pose,
       boost::optional<gtsam::Matrix&> jacobian = boost::none) const override {
-    gtsam::Matrix36 translation_jacobian;
-    const gtsam::Point3& translation = pose.translation(translation_jacobian);
+    gtsam::Matrix36 antenna_jacobian;
+    const gtsam::Point3 antenna_position =
+        pose.transformFrom(antenna_in_base_, antenna_jacobian);
     if (jacobian) {
-      *jacobian = translation_jacobian.topRows<2>();
+      *jacobian = antenna_jacobian.topRows<2>();
     }
-    return (gtsam::Vector(2) << translation.x() - east_,
-            translation.y() - north_)
+    return (gtsam::Vector(2) << antenna_position.x() - east_,
+            antenna_position.y() - north_)
         .finished();
   }
 
  private:
   double east_;
   double north_;
+  gtsam::Point3 antenna_in_base_;
 };
 
 class YawFactor final : public gtsam::NoiseModelFactor1<gtsam::Pose3> {

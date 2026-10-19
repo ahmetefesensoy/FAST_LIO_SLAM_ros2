@@ -27,6 +27,22 @@ Mahalanobis threshold, and yaw innovations above their threshold are rejected.
 Set `heading_is_north_clockwise:=true` only when the input quaternion encodes a
 north-zero, clockwise-positive vendor heading rather than normalized ENU yaw.
 The conversion also supports antenna yaw offset and meridian convergence.
+Set `antenna_offset_{x,y,z}` to the GNSS antenna origin expressed in
+`base_frame`; the X/Y factor rotates this 3D lever arm with the estimated rover
+attitude. With `initialize_from_absolute_measurements:=true`, the first valid
+GNSS and heading pair establishes the graph's global X/Y/yaw datum instead of
+being rejected against FAST-LIO's unrelated local origin.
+
+The TF ownership is:
+
+```text
+map --(SC-PGO global correction)--> odom --(FAST-LIO local pose)--> base_link
+```
+
+SC-PGO computes `map -> odom` from each optimized keyframe and its matching
+unmodified FAST-LIO keyframe. Disable `publish_map_to_odom` if another node owns
+that transform. `map_frame`, `odom_frame`, `base_frame`, all input topics, and
+all visualization output topics are parameters in `config/pgo_ros2.yaml`.
 
 Run the focused tests with:
 
@@ -35,8 +51,8 @@ ctest --test-dir build/aloam_velodyne --output-on-failure
 ```
 
 The backend must be the only source of global correction when enabled. FAST-LIO
-continues to own the smooth local `odom -> base_link` transform; a later rover
-integration layer derives and publishes `map -> odom` from the optimized graph.
+continues to own the smooth local `odom -> base_link` transform while SC-PGO
+publishes only `map -> odom`.
 
 ## What is SC-A-LOAM? 
 - A real-time LiDAR SLAM package that integrates A-LOAM and ScanContext. 

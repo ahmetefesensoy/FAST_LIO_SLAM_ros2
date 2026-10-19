@@ -76,6 +76,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pgo_factors test/test_pgo_factors.cpp)
   target_include_directories(test_pgo_factors PRIVATE include)
   target_link_libraries(test_pgo_factors gtsam)
+  ament_add_gtest(test_pgo_transforms test/test_pgo_transforms.cpp)
+  target_include_directories(test_pgo_transforms PRIVATE include)
+  target_link_libraries(test_pgo_transforms gtsam)
   find_program(BASH_EXECUTABLE bash REQUIRED)
   add_test(
     NAME test_pgo_shutdown

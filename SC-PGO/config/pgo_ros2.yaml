@@ -10,6 +10,11 @@
     odometry_topic: /Odometry
     gnss_odometry_topic: /odometry/gps
     rtk_heading_topic: /rtk/heading_pose
+    optimized_odometry_topic: /aft_pgo_odom
+    optimized_path_topic: /aft_pgo_path
+    optimized_map_topic: /aft_pgo_map
+    loop_scan_topic: /loop_scan_local
+    loop_submap_topic: /loop_submap_local
     use_gnss_position: true
     use_rtk_heading: true
     use_altitude_factor: false
@@ -19,3 +24,12 @@
     heading_is_north_clockwise: false
     antenna_yaw_offset: 0.0
     meridian_convergence: 0.0
+    # GNSS antenna origin expressed in base_frame (metres).
+    antenna_offset_x: 0.0
+    antenna_offset_y: 0.0
+    antenna_offset_z: 0.0
+    initialize_from_absolute_measurements: true
+    publish_map_to_odom: true
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link

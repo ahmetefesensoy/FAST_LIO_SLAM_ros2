@@ -48,6 +48,25 @@ TEST(PgoFactors, YawFactorWrapsAcrossPiBoundary) {
   EXPECT_NEAR((jacobian.block<1, 3>(0, 3).norm()), 0.0, 1e-12);
 }
 
+TEST(PgoFactors, PositionFactorRotatesAntennaLeverArmWithBase) {
+  const auto noise = gtsam::noiseModel::Isotropic::Sigma(2, 0.1);
+  const pgo::PositionXYFactor factor(
+      gtsam::Symbol('x', 0), 4.0, 6.0, noise,
+      gtsam::Point3(1.0, 0.0, 0.0));
+  const gtsam::Pose3 pose(
+      gtsam::Rot3::RzRyRx(0.0, 0.0, kPi / 2.0),
+      gtsam::Point3(4.0, 5.0, 0.0));
+
+  gtsam::Matrix jacobian;
+  const gtsam::Vector error = factor.evaluateError(pose, jacobian);
+
+  EXPECT_NEAR(error(0), 0.0, 1e-9);
+  EXPECT_NEAR(error(1), 0.0, 1e-9);
+  ASSERT_EQ(jacobian.rows(), 2);
+  ASSERT_EQ(jacobian.cols(), 6);
+  EXPECT_GT((jacobian.block<2, 3>(0, 0).norm()), 0.0);
+}
+
 TEST(PgoFactors, GnssAndHeadingCorrectADriftedPose) {
   const gtsam::Key key = gtsam::Symbol('x', 0);
   gtsam::NonlinearFactorGraph graph;
