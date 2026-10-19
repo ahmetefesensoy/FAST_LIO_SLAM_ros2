@@ -1,5 +1,43 @@
 # SC-A-LOAM
 
+## ROS 2 Humble: FAST-LIO + GNSS + RTK heading
+
+This branch keeps the original Scan Context/iSAM2 backend and adds a ROS 2
+Humble integration for a FAST-LIO frontend.
+
+Install the packaged GTSAM dependency and build:
+
+```bash
+sudo apt install ros-humble-gtsam
+colcon build --packages-select aloam_velodyne
+source install/setup.bash
+ros2 launch aloam_velodyne pgo.launch.py
+```
+
+The pose-graph node consumes:
+
+- `/cloud_registered_body` (`sensor_msgs/msg/PointCloud2`): deskewed keyframe cloud
+- `/Odometry` (`nav_msgs/msg/Odometry`): high-rate FAST-LIO local odometry
+- `/odometry/gps` (`nav_msgs/msg/Odometry`): ENU GNSS position and covariance
+- `/rtk/heading_pose` (`geometry_msgs/msg/PoseWithCovarianceStamped`): normalized ENU yaw and yaw variance in covariance index 35
+
+The GNSS factor constrains X/Y only. The RTK factor constrains yaw only. Invalid
+covariance, stale measurements, position innovations above the configured
+Mahalanobis threshold, and yaw innovations above their threshold are rejected.
+Set `heading_is_north_clockwise:=true` only when the input quaternion encodes a
+north-zero, clockwise-positive vendor heading rather than normalized ENU yaw.
+The conversion also supports antenna yaw offset and meridian convergence.
+
+Run the focused tests with:
+
+```bash
+ctest --test-dir build/aloam_velodyne --output-on-failure
+```
+
+The backend must be the only source of global correction when enabled. FAST-LIO
+continues to own the smooth local `odom -> base_link` transform; a later rover
+integration layer derives and publishes `map -> odom` from the optimized graph.
+
 ## What is SC-A-LOAM? 
 - A real-time LiDAR SLAM package that integrates A-LOAM and ScanContext. 
     - **A-LOAM** for odometry (i.e., consecutive motion estimation)

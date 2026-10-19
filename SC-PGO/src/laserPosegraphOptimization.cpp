@@ -7,6 +7,8 @@
 #include <iostream>
 #include <string>
 #include <optional>
+#include <filesystem>
+#include <csignal>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -37,6 +39,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 
 #include <eigen3/Eigen/Dense>
 
@@ -60,6 +63,8 @@
 #include "aloam_velodyne/tic_toc.h"
 
 #include "scancontext/Scancontext.h"
+#include "pgo/factors.hpp"
+#include "pgo/measurement_utils.hpp"
 
 using namespace gtsam;
 
@@ -67,6 +72,15 @@ using std::cout;
 using std::endl;
 
 std::shared_ptr<rclcpp::Node> node;
+volatile std::sig_atomic_t stopRequested = 0;
+
+void requestStop(int) {
+    stopRequested = 1;
+}
+
+bool keepRunning() {
+    return rclcpp::ok() && stopRequested == 0;
+}
 
 double keyframeMeterGap;
 double keyframeDegGap, keyframeRadGap;
@@ -80,7 +94,8 @@ Pose6D odom_pose_curr {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init pose is zero
 
 std::queue<nav_msgs::msg::Odometry::ConstSharedPtr> odometryBuf;
 std::queue<sensor_msgs::msg::PointCloud2::ConstSharedPtr> fullResBuf;
-std::queue<sensor_msgs::msg::NavSatFix::ConstSharedPtr> gpsBuf;
+std::queue<nav_msgs::msg::Odometry::ConstSharedPtr> gnssBuf;
+std::queue<geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr> headingBuf;
 std::queue<std::pair<int, int> > scLoopICPBuf;
 
 std::mutex mBuf;
@@ -122,10 +137,19 @@ pcl::PointCloud<PointType>::Ptr laserCloudMapPGO(new pcl::PointCloud<PointType>(
 pcl::VoxelGrid<PointType> downSizeFilterMapPGO;
 bool laserCloudMapPGORedraw = true;
 
-bool useGPS = true;
-// bool useGPS = false;
-sensor_msgs::msg::NavSatFix::ConstSharedPtr currGPS;
-bool hasGPSforThisKF = false;
+bool useGnssPosition = true;
+bool useRtkHeading = true;
+bool useAltitudeFactor = false;
+double measurementTimeTolerance = 0.2;
+double gnssMahalanobisThreshold = 9.21;
+double headingMahalanobisThreshold = 9.0;
+double antennaYawOffset = 0.0;
+double meridianConvergence = 0.0;
+bool headingIsNorthClockwise = false;
+nav_msgs::msg::Odometry::ConstSharedPtr currGnss;
+geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr currHeading;
+bool hasGnssForThisKF = false;
+bool hasHeadingForThisKF = false;
 bool gpsOffsetInitialized = false; 
 double gpsAltitudeInitOffset = 0.0;
 double recentOptimizedX = 0.0;
@@ -144,6 +168,24 @@ double toSec(const builtin_interfaces::msg::Time& stamp) {
   const double sec = (double) stamp.sec;
   const double nsec = (double) stamp.nanosec;
   return (double)sec + 1e-9*(double)nsec;
+}
+
+template <typename MessageT>
+typename MessageT::ConstSharedPtr popNearestMeasurement(
+    std::queue<typename MessageT::ConstSharedPtr>& buffer,
+    double target_time,
+    double tolerance) {
+  while (!buffer.empty() &&
+         toSec(buffer.front()->header.stamp) < target_time - tolerance) {
+    buffer.pop();
+  }
+  if (buffer.empty() ||
+      std::abs(toSec(buffer.front()->header.stamp) - target_time) > tolerance) {
+    return nullptr;
+  }
+  auto measurement = buffer.front();
+  buffer.pop();
+  return measurement;
 }
 
 std::string padZeros(int val, int num_digits = 6) {
@@ -214,14 +256,26 @@ void laserCloudFullResHandler(const sensor_msgs::msg::PointCloud2::ConstSharedPt
 	mBuf.unlock();
 } // laserCloudFullResHandler
 
-void gpsHandler(const sensor_msgs::msg::NavSatFix::ConstSharedPtr _gps)
+void gnssHandler(const nav_msgs::msg::Odometry::ConstSharedPtr gnss)
 {
-    if(useGPS) {
+    if(useGnssPosition || useAltitudeFactor) {
         mBuf.lock();
-        gpsBuf.push(_gps);
+        gnssBuf.push(gnss);
+        while (gnssBuf.size() > 1000) gnssBuf.pop();
         mBuf.unlock();
     }
-} // gpsHandler
+}
+
+void headingHandler(
+    const geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr heading)
+{
+    if(useRtkHeading) {
+        mBuf.lock();
+        headingBuf.push(heading);
+        while (headingBuf.size() > 1000) headingBuf.pop();
+        mBuf.unlock();
+    }
+}
 
 void initNoises( void )
 {
@@ -506,7 +560,7 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
 
 void process_pg()
 {
-    while(1)
+    while(keepRunning())
     {
 		while ( !odometryBuf.empty() && !fullResBuf.empty() )
         {
@@ -535,20 +589,13 @@ void process_pg()
             Pose6D pose_curr = getOdom(odometryBuf.front());
             odometryBuf.pop();
 
-            // find nearest gps 
-            double eps = 0.1; // find a gps topioc arrived within eps second 
-            while (!gpsBuf.empty()) {
-                auto thisGPS = gpsBuf.front();
-                auto thisGPSTime = toSec(thisGPS->header.stamp);
-                if( abs(thisGPSTime - timeLaserOdometry) < eps ) {
-                    currGPS = thisGPS;
-                    hasGPSforThisKF = true; 
-                    break;
-                } else {
-                    hasGPSforThisKF = false;
-                }
-                gpsBuf.pop();
-            }
+            currGnss = popNearestMeasurement<nav_msgs::msg::Odometry>(
+                gnssBuf, timeLaserOdometry, measurementTimeTolerance);
+            currHeading =
+                popNearestMeasurement<geometry_msgs::msg::PoseWithCovarianceStamped>(
+                    headingBuf, timeLaserOdometry, measurementTimeTolerance);
+            hasGnssForThisKF = static_cast<bool>(currGnss);
+            hasHeadingForThisKF = static_cast<bool>(currHeading);
             mBuf.unlock(); 
 
             //
@@ -574,8 +621,8 @@ void process_pg()
                 continue; 
 
             if( !gpsOffsetInitialized ) {
-                if(hasGPSforThisKF) { // if the very first frame 
-                    gpsAltitudeInitOffset = currGPS->altitude;
+                if(hasGnssForThisKF) { // if the very first frame
+                    gpsAltitudeInitOffset = currGnss->pose.pose.position.z;
                     gpsOffsetInitialized = true;
                 } 
             }
@@ -626,14 +673,76 @@ void process_pg()
                     // odom factor
                     gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(prev_node_idx, curr_node_idx, poseFrom.between(poseTo), odomNoise));
 
-                    // gps factor 
-                    if(hasGPSforThisKF) {
-                        double curr_altitude_offseted = currGPS->altitude - gpsAltitudeInitOffset;
-                        mtxRecentPose.lock();
-                        gtsam::Point3 gpsConstraint(recentOptimizedX, recentOptimizedY, curr_altitude_offseted); // in this example, only adjusting altitude (for x and y, very big noises are set) 
-                        mtxRecentPose.unlock();
-                        gtSAMgraph.add(gtsam::GPSFactor(curr_node_idx, gpsConstraint, robustGPSNoise));
-                        cout << "GPS factor added at node " << curr_node_idx << endl;
+                    if(hasGnssForThisKF && useGnssPosition) {
+                        const auto& covariance = currGnss->pose.covariance;
+                        const double covariance_xx = covariance[0];
+                        const double covariance_xy = covariance[1];
+                        const double covariance_yy = covariance[7];
+                        const double east = currGnss->pose.pose.position.x;
+                        const double north = currGnss->pose.pose.position.y;
+                        const double residual_x = poseTo.translation().x() - east;
+                        const double residual_y = poseTo.translation().y() - north;
+                        const double mahalanobis = pgo::positionMahalanobisSquared(
+                            residual_x, residual_y,
+                            covariance_xx, covariance_xy, covariance_yy);
+                        if (mahalanobis <= gnssMahalanobisThreshold) {
+                            gtsam::Matrix2 covariance_xy_matrix;
+                            covariance_xy_matrix << covariance_xx, covariance_xy,
+                                                    covariance_xy, covariance_yy;
+                            auto gaussian = gtsam::noiseModel::Gaussian::Covariance(
+                                covariance_xy_matrix);
+                            auto robust = gtsam::noiseModel::Robust::Create(
+                                gtsam::noiseModel::mEstimator::Cauchy::Create(1.0),
+                                gaussian);
+                            gtSAMgraph.add(pgo::PositionXYFactor(
+                                curr_node_idx, east, north, robust));
+                            cout << "GNSS XY factor added at node " << curr_node_idx << endl;
+                        } else {
+                            RCLCPP_WARN(
+                                node->get_logger(),
+                                "GNSS XY rejected at node %d (mahalanobis=%.3f)",
+                                curr_node_idx, mahalanobis);
+                        }
+                    }
+
+                    if(hasHeadingForThisKF && useRtkHeading) {
+                        const auto& orientation = currHeading->pose.pose.orientation;
+                        double roll, pitch, heading;
+                        tf2::Matrix3x3(tf2::Quaternion(
+                            orientation.x, orientation.y,
+                            orientation.z, orientation.w)).getRPY(roll, pitch, heading);
+                        const double measured_yaw = headingIsNorthClockwise
+                            ? pgo::northClockwiseHeadingToEnuYaw(
+                                  heading, antennaYawOffset, meridianConvergence)
+                            : pgo::wrapAngle(
+                                  heading + antennaYawOffset + meridianConvergence);
+                        const double yaw_variance = currHeading->pose.covariance[35];
+                        if (pgo::acceptYawMeasurement(
+                                poseTo.rotation().yaw(), measured_yaw,
+                                yaw_variance, headingMahalanobisThreshold)) {
+                            auto gaussian = gtsam::noiseModel::Isotropic::Variance(
+                                1, yaw_variance);
+                            auto robust = gtsam::noiseModel::Robust::Create(
+                                gtsam::noiseModel::mEstimator::Cauchy::Create(1.0),
+                                gaussian);
+                            gtSAMgraph.add(pgo::YawFactor(
+                                curr_node_idx, measured_yaw, robust));
+                            cout << "RTK yaw factor added at node " << curr_node_idx << endl;
+                        } else {
+                            RCLCPP_WARN(
+                                node->get_logger(),
+                                "RTK yaw rejected at node %d", curr_node_idx);
+                        }
+                    }
+
+                    if(hasGnssForThisKF && useAltitudeFactor) {
+                        const double altitude =
+                            currGnss->pose.pose.position.z - gpsAltitudeInitOffset;
+                        gtsam::Point3 altitudeConstraint(
+                            poseTo.translation().x(), poseTo.translation().y(), altitude);
+                        gtSAMgraph.add(gtsam::GPSFactor(
+                            curr_node_idx, altitudeConstraint, robustGPSNoise));
+                        cout << "Altitude factor added at node " << curr_node_idx << endl;
                     }
                     initialEstimate.insert(curr_node_idx, poseTo);                
                     // runISAM2opt();
@@ -684,7 +793,7 @@ void process_lcd(void)
 {
     float loopClosureFrequency = 1.0; // can change 
     rclcpp::Rate rate(loopClosureFrequency);
-    while (rclcpp::ok())
+    while (keepRunning())
     {
         rate.sleep();
         performSCLoopClosure();
@@ -694,7 +803,7 @@ void process_lcd(void)
 
 void process_icp(void)
 {
-    while(1)
+    while(keepRunning())
     {
 		while ( !scLoopICPBuf.empty() )
         {
@@ -729,7 +838,7 @@ void process_viz_path(void)
 {
     float hz = 10.0; 
     rclcpp::Rate rate(hz);
-    while (rclcpp::ok()) {
+    while (keepRunning()) {
         rate.sleep();
         if(recentIdxUpdated > 1) {
             pubPath();
@@ -741,7 +850,7 @@ void process_isam(void)
 {
     float hz = 1; 
     rclcpp::Rate rate(hz);
-    while (rclcpp::ok()) {
+    while (keepRunning()) {
         rate.sleep();
         if( gtSAMgraphMade ) {
             mtxPosegraph.lock();
@@ -785,7 +894,7 @@ void process_viz_map(void)
 {
     float vizmapFrequency = 0.1; // 0.1 means run onces every 10s
     rclcpp::Rate rate(vizmapFrequency);
-    while (rclcpp::ok()) {
+    while (keepRunning()) {
         rate.sleep();
         if(recentIdxUpdated > 1) {
             pubMap();
@@ -796,18 +905,25 @@ void process_viz_map(void)
 
 int main(int argc, char **argv)
 {
-  rclcpp::init(argc, argv);
+  rclcpp::init(
+      argc, argv, rclcpp::InitOptions(),
+      rclcpp::SignalHandlerOptions::None);
+  std::signal(SIGINT, requestStop);
+  std::signal(SIGTERM, requestStop);
   node = rclcpp::Node::make_shared("laserPGO");
 
-  node->declare_parameter("save_directory", "/"); // pose assignment every k m move 
+  node->declare_parameter("save_directory", "/tmp/fast_lio_slam");
   save_directory = node->get_parameter("save_directory").get_parameter_value().get<std::string>();
-    pgKITTIformat = save_directory + "optimized_poses.txt";
-    odomKITTIformat = save_directory + "odom_poses.txt";
-    pgTimeSaveStream = std::fstream(save_directory + "times.txt", std::fstream::out); 
+    const std::filesystem::path savePath(save_directory);
+    std::filesystem::create_directories(savePath);
+    pgKITTIformat = (savePath / "optimized_poses.txt").string();
+    odomKITTIformat = (savePath / "odom_poses.txt").string();
+    pgTimeSaveStream = std::fstream((savePath / "times.txt").string(), std::fstream::out);
     pgTimeSaveStream.precision(std::numeric_limits<double>::max_digits10);
-    pgScansDirectory = save_directory + "Scans/";
-    auto unused = system((std::string("exec rm -r ") + pgScansDirectory).c_str());
-    unused = system((std::string("mkdir -p ") + pgScansDirectory).c_str());
+    const std::filesystem::path scansPath = savePath / "Scans";
+    std::filesystem::remove_all(scansPath);
+    std::filesystem::create_directories(scansPath);
+    pgScansDirectory = scansPath.string() + "/";
 
   node->declare_parameter("keyframe_meter_gap", 2.0); // pose assignment every k m move 
   keyframeMeterGap = node->get_parameter("keyframe_meter_gap").get_parameter_value().get<double>();
@@ -816,7 +932,7 @@ int main(int argc, char **argv)
     keyframeRadGap = deg2rad(keyframeDegGap);
 
   node->declare_parameter("sc_dist_thres", 0.2);
-  scDistThres = node->get_parameter("keyframe_deg_gap").get_parameter_value().get<double>();
+  scDistThres = node->get_parameter("sc_dist_thres").get_parameter_value().get<double>();
   node->declare_parameter("sc_max_radius", 80.0); // 80 is recommended for outdoor, and lower (ex, 20, 40) values are recommended for indoor 
   scMaximumRadius = node->get_parameter("sc_max_radius").get_parameter_value().get<double>();
 
@@ -838,9 +954,42 @@ int main(int argc, char **argv)
   mapVizFilterSize = node->get_parameter("mapviz_filter_size").get_parameter_value().get<double>();
     downSizeFilterMapPGO.setLeafSize(mapVizFilterSize, mapVizFilterSize, mapVizFilterSize);
 
-	auto subLaserCloudFullRes = node->create_subscription<sensor_msgs::msg::PointCloud2>("/velodyne_cloud_registered_local", 100, laserCloudFullResHandler);
-	auto subLaserOdometry = node->create_subscription<nav_msgs::msg::Odometry>("/aft_mapped_to_init", 100, laserOdometryHandler);
-	auto subGPS = node->create_subscription<sensor_msgs::msg::NavSatFix>("/gps/fix", 100, gpsHandler);
+  node->declare_parameter("use_gnss_position", true);
+  useGnssPosition = node->get_parameter("use_gnss_position").as_bool();
+  node->declare_parameter("use_rtk_heading", true);
+  useRtkHeading = node->get_parameter("use_rtk_heading").as_bool();
+  node->declare_parameter("use_altitude_factor", false);
+  useAltitudeFactor = node->get_parameter("use_altitude_factor").as_bool();
+  node->declare_parameter("measurement_time_tolerance", 0.2);
+  measurementTimeTolerance =
+      node->get_parameter("measurement_time_tolerance").as_double();
+  node->declare_parameter("gnss_mahalanobis_threshold", 9.21);
+  gnssMahalanobisThreshold =
+      node->get_parameter("gnss_mahalanobis_threshold").as_double();
+  node->declare_parameter("heading_mahalanobis_threshold", 9.0);
+  headingMahalanobisThreshold =
+      node->get_parameter("heading_mahalanobis_threshold").as_double();
+  node->declare_parameter("antenna_yaw_offset", 0.0);
+  antennaYawOffset = node->get_parameter("antenna_yaw_offset").as_double();
+  node->declare_parameter("meridian_convergence", 0.0);
+  meridianConvergence = node->get_parameter("meridian_convergence").as_double();
+  node->declare_parameter("heading_is_north_clockwise", false);
+  headingIsNorthClockwise =
+      node->get_parameter("heading_is_north_clockwise").as_bool();
+
+  node->declare_parameter("cloud_topic", "/cloud_registered_body");
+  node->declare_parameter("odometry_topic", "/Odometry");
+  node->declare_parameter("gnss_odometry_topic", "/odometry/gps");
+  node->declare_parameter("rtk_heading_topic", "/rtk/heading_pose");
+  const auto cloudTopic = node->get_parameter("cloud_topic").as_string();
+  const auto odometryTopic = node->get_parameter("odometry_topic").as_string();
+  const auto gnssTopic = node->get_parameter("gnss_odometry_topic").as_string();
+  const auto headingTopic = node->get_parameter("rtk_heading_topic").as_string();
+
+	auto subLaserCloudFullRes = node->create_subscription<sensor_msgs::msg::PointCloud2>(cloudTopic, 100, laserCloudFullResHandler);
+	auto subLaserOdometry = node->create_subscription<nav_msgs::msg::Odometry>(odometryTopic, 100, laserOdometryHandler);
+	auto subGNSS = node->create_subscription<nav_msgs::msg::Odometry>(gnssTopic, 100, gnssHandler);
+	auto subHeading = node->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(headingTopic, 100, headingHandler);
 
 	pubOdomAftPGO = node->create_publisher<nav_msgs::msg::Odometry>("/aft_pgo_odom", 100);
 	pubOdomRepubVerifier = node->create_publisher<nav_msgs::msg::Odometry>("/repub_odom", 100);
@@ -858,7 +1007,32 @@ int main(int argc, char **argv)
 	std::thread viz_map {process_viz_map}; // visualization - map (low frequency because it is heavy)
 	std::thread viz_path {process_viz_path}; // visualization - path (high frequency)
 
- 	rclcpp::spin(node);
+	while (keepRunning()) {
+		rclcpp::spin_some(node);
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+
+	posegraph_slam.join();
+	lc_detection.join();
+	icp_calculation.join();
+	isam_update.join();
+	viz_map.join();
+	viz_path.join();
+
+	subLaserCloudFullRes.reset();
+	subLaserOdometry.reset();
+	subGNSS.reset();
+	subHeading.reset();
+	pubMapAftPGO.reset();
+	pubLoopScanLocal.reset();
+	pubLoopSubmapLocal.reset();
+	pubOdomAftPGO.reset();
+	pubOdomRepubVerifier.reset();
+	pubPathAftPGO.reset();
+	delete isam;
+	isam = nullptr;
+	node.reset();
+	rclcpp::shutdown();
 
 	return 0;
 }
