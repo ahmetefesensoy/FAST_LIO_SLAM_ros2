@@ -58,7 +58,9 @@
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/vector3.hpp>
+#ifdef FAST_LIO_HAS_LIVOX
 #include <livox_interfaces/msg/custom_msg.hpp>
+#endif
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
 
@@ -302,6 +304,7 @@ void standard_pcl_cbk(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
 
 double timediff_lidar_wrt_imu = 0.0;
 bool   timediff_set_flg = false;
+#ifdef FAST_LIO_HAS_LIVOX
 void livox_pcl_cbk(const livox_interfaces::msg::CustomMsg::ConstSharedPtr msg)
 {
     mtx_buffer.lock();
@@ -338,6 +341,7 @@ void livox_pcl_cbk(const livox_interfaces::msg::CustomMsg::ConstSharedPtr msg)
     mtx_buffer.unlock();
     sig_buffer.notify_all();
 }
+#endif
 
 void imu_cbk(const sensor_msgs::msg::Imu::ConstSharedPtr msg_in)
 {
@@ -755,11 +759,11 @@ int main(int argc, char** argv)
 
     shared_ptr<ImuProcess> p_imu(new ImuProcess(node));
 
-    node->declare_parameter("publish/scan_publish_en",1);
+    node->declare_parameter("publish/scan_publish_en", true);
     scan_pub_en = node->get_parameter("publish/scan_publish_en").get_parameter_value().get<bool>();
-    node->declare_parameter("publish/dense_publish_en",0);
+    node->declare_parameter("publish/dense_publish_en", false);
     dense_pub_en = node->get_parameter("publish/dense_publish_en").get_parameter_value().get<bool>();
-    node->declare_parameter("publish/scan_bodyframe_pub_en",1);
+    node->declare_parameter("publish/scan_bodyframe_pub_en", true);
     scan_body_pub_en = node->get_parameter("publish/scan_bodyframe_pub_en").get_parameter_value().get<bool>();
     node->declare_parameter("max_iteration",4);
     NUM_MAX_ITERATIONS = node->get_parameter("max_iteration").get_parameter_value().get<int>();
@@ -779,9 +783,9 @@ int main(int argc, char** argv)
     filter_size_map_min = node->get_parameter("filter_size_map").get_parameter_value().get<double>();
     node->declare_parameter("cube_side_length",200.0);
     cube_len = node->get_parameter("cube_side_length").get_parameter_value().get<double>();
-    node->declare_parameter("mapping/det_range",300.f);
+    node->declare_parameter("mapping/det_range", 300.0);
     DET_RANGE = node->get_parameter("mapping/det_range").get_parameter_value().get<double>();
-    node->declare_parameter("mapping/fov_degree",180);
+    node->declare_parameter("mapping/fov_degree", 180.0);
     fov_deg = node->get_parameter("mapping/fov_degree").get_parameter_value().get<double>();
     node->declare_parameter("mapping/gyr_cov",0.1);
     gyr_cov = node->get_parameter("mapping/gyr_cov").get_parameter_value().get<double>();
@@ -799,11 +803,11 @@ int main(int argc, char** argv)
     p_pre->N_SCANS = node->get_parameter("preprocess/scan_line").get_parameter_value().get<int>();
     node->declare_parameter("point_filter_num", 2);
     p_pre->point_filter_num = node->get_parameter("point_filter_num").get_parameter_value().get<int>();
-    node->declare_parameter("feature_extract_enable", 0);
+    node->declare_parameter("feature_extract_enable", false);
     p_pre->feature_enabled = node->get_parameter("feature_extract_enable").get_parameter_value().get<bool>();
-    node->declare_parameter("runtime_pos_log_enable", 0);
+    node->declare_parameter("runtime_pos_log_enable", false);
     runtime_pos_log = node->get_parameter("runtime_pos_log_enable").get_parameter_value().get<bool>();
-    node->declare_parameter("pcd_save_enable", 0);
+    node->declare_parameter("pcd_save_enable", false);
     pcd_save_en = node->get_parameter("pcd_save_enable").get_parameter_value().get<bool>();
     node->declare_parameter("mapping/extrinsic_T", vector<double>());
     extrinT = node->get_parameter("mapping/extrinsic_T").get_parameter_value().get<vector<double>>();
@@ -860,9 +864,15 @@ int main(int argc, char** argv)
     /*** ROS subscribe initialization ***/
     shared_ptr<void> sub_pcl = nullptr;
     if (p_pre->lidar_type == AVIA) {
+#ifdef FAST_LIO_HAS_LIVOX
         sub_pcl = node->create_subscription<livox_interfaces::msg::CustomMsg>(lid_topic, 200000, livox_pcl_cbk);
+#else
+        RCLCPP_FATAL(node->get_logger(), "Livox lidar_type requested but BUILD_LIVOX_SUPPORT is OFF");
+        rclcpp::shutdown();
+        return 2;
+#endif
     } else {
-        sub_pcl = node->create_subscription<livox_interfaces::msg::CustomMsg>(lid_topic, 200000, standard_pcl_cbk);
+        sub_pcl = node->create_subscription<sensor_msgs::msg::PointCloud2>(lid_topic, 200000, standard_pcl_cbk);
     }
     auto sub_imu = node->create_subscription<sensor_msgs::msg::Imu>(imu_topic, 200000, imu_cbk);
     auto pubLaserCloudFull = node->create_publisher<sensor_msgs::msg::PointCloud2>
@@ -880,7 +890,6 @@ int main(int argc, char** argv)
     auto pubPath          = node->create_publisher<nav_msgs::msg::Path>
             ("/path", 100000);
 //------------------------------------------------------------------------------------------------------
-    signal(SIGINT, SigHandle);
     rclcpp::Rate rate(5000);
     bool status = rclcpp::ok();
     while (status)

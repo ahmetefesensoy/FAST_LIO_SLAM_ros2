@@ -1,7 +1,9 @@
 #include <rclcpp/rclcpp.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#ifdef FAST_LIO_HAS_LIVOX
 #include <livox_interfaces/msg/custom_msg.hpp>
+#endif
 
 using namespace std;
 
@@ -86,7 +88,9 @@ class Preprocess
   Preprocess();
   ~Preprocess();
   
+#ifdef FAST_LIO_HAS_LIVOX
   void process(const livox_interfaces::msg::CustomMsg::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
+#endif
   void process(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg, PointCloudXYZI::Ptr &pcl_out);
   void set(bool feat_en, int lid_type, double bld, int pfilt_num);
 
@@ -101,7 +105,9 @@ class Preprocess
     
 
   private:
+#ifdef FAST_LIO_HAS_LIVOX
   void avia_handler(const livox_interfaces::msg::CustomMsg::ConstSharedPtr &msg);
+#endif
   void oust64_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void velodyne_handler(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &msg);
   void give_feature(PointCloudXYZI &pl, vector<orgtype> &types);

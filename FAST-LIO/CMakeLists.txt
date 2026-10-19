@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.5)
 project(fast_lio)
 
+option(BUILD_LIVOX_SUPPORT "Build support for Livox CustomMsg input" OFF)
+
 SET(CMAKE_BUILD_TYPE "Debug")
 
 ADD_COMPILE_OPTIONS(-std=c++14 )
@@ -49,9 +51,14 @@ find_package(sensor_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(pcl_ros REQUIRED)
+find_package(pcl_conversions REQUIRED)
 find_package(tf2 REQUIRED)
-find_package(livox_ros2_driver REQUIRED)
+find_package(tf2_ros REQUIRED)
+if(BUILD_LIVOX_SUPPORT)
+  find_package(livox_ros2_driver REQUIRED)
+endif()
 find_package(rosidl_default_generators REQUIRED)
 # find_package(eigen_conversions REQUIRED)
 
@@ -80,8 +87,6 @@ rosidl_generate_interfaces(
   geometry_msgs
 )
 
-ament_package()
-
 # catkin_package(
 #   CATKIN_DEPENDS geometry_msgs nav_msgs roscpp rospy std_msgs message_runtime
 #   DEPENDS EIGEN3 PCL
@@ -89,8 +94,24 @@ ament_package()
 # )
 
 add_executable(fastlio_mapping src/laserMapping.cpp include/ikd-Tree/ikd_Tree.cpp src/preprocess.cpp)
+if(BUILD_LIVOX_SUPPORT)
+  target_compile_definitions(fastlio_mapping PRIVATE FAST_LIO_HAS_LIVOX=1)
+endif()
 rosidl_target_interfaces(fastlio_mapping ${PROJECT_NAME} "rosidl_typesupport_cpp")
 add_dependencies(fastlio_mapping ${PROJECT_NAME})
-ament_target_dependencies(fastlio_mapping rclcpp rclpy std_msgs geometry_msgs nav_msgs sensor_msgs livox_ros2_driver tf2 tf2_ros)
+ament_target_dependencies(fastlio_mapping rclcpp rclpy std_msgs geometry_msgs nav_msgs sensor_msgs visualization_msgs pcl_conversions tf2 tf2_ros)
+if(BUILD_LIVOX_SUPPORT)
+  ament_target_dependencies(fastlio_mapping livox_ros2_driver)
+endif()
 target_link_libraries(fastlio_mapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES})
 target_include_directories(fastlio_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
+
+install(TARGETS fastlio_mapping
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY config launch rviz_cfg
+  DESTINATION share/${PROJECT_NAME}
+)
+
+ament_package()
