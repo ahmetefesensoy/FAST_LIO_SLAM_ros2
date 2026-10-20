@@ -50,6 +50,20 @@ Run the focused tests with:
 ctest --test-dir build/aloam_velodyne --output-on-failure
 ```
 
+Before replaying a bag, validate its topic contract and obtain message counts
+and average rates from `metadata.yaml`:
+
+```bash
+ros2 run aloam_velodyne bag_preflight.py /path/to/bag --profile rtk_fusion \
+  --output /tmp/bag_preflight.json
+```
+
+Available contracts are `fastlio_raw`, `pose_graph`, and `rtk_fusion`; their
+expected topic names and message types live in `config/bag_contract.yaml`.
+Missing, empty, or wrong-type topics cause exit code 2, so the command can gate
+automated bag benchmarks. This check does not claim localization accuracy; ATE,
+RPE, CPU and memory require an actual recorded dataset and ground truth.
+
 The backend must be the only source of global correction when enabled. FAST-LIO
 continues to own the smooth local `odom -> base_link` transform while SC-PGO
 publishes only `map -> odom`.

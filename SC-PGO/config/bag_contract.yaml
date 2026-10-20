@@ -1,0 +1,12 @@
+profiles:
+  fastlio_raw:
+    /ouster/points: sensor_msgs/msg/PointCloud2
+    /ouster/imu: sensor_msgs/msg/Imu
+  pose_graph:
+    /cloud_registered_body: sensor_msgs/msg/PointCloud2
+    /Odometry: nav_msgs/msg/Odometry
+  rtk_fusion:
+    /cloud_registered_body: sensor_msgs/msg/PointCloud2
+    /Odometry: nav_msgs/msg/Odometry
+    /odometry/gps: nav_msgs/msg/Odometry
+    /rtk/heading_pose: geometry_msgs/msg/PoseWithCovarianceStamped

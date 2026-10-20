@@ -577,12 +577,16 @@ void process_pg()
 {
     while(keepRunning())
     {
-		while ( !odometryBuf.empty() && !fullResBuf.empty() )
+		while (true)
         {
             //
             // pop and check keyframe is or not  
             // 
-			mBuf.lock();       
+			mBuf.lock();
+            if (odometryBuf.empty() || fullResBuf.empty()) {
+                mBuf.unlock();
+                break;
+            }
             while (!odometryBuf.empty() && toSec(odometryBuf.front()->header.stamp) < toSec(fullResBuf.front()->header.stamp))
                 odometryBuf.pop();
             if (odometryBuf.empty())
@@ -820,6 +824,7 @@ void process_pg()
 
 void performSCLoopClosure(void)
 {
+    std::lock_guard<std::mutex> keyframe_lock(mKF);
     if( int(keyframePoses.size()) < scManager.NUM_EXCLUDE_RECENT) // do not try too early 
         return;
 
@@ -853,13 +858,17 @@ void process_icp(void)
 {
     while(keepRunning())
     {
-		while ( !scLoopICPBuf.empty() )
+		while (true)
         {
+            mBuf.lock();
+            if (scLoopICPBuf.empty()) {
+                mBuf.unlock();
+                break;
+            }
             if( scLoopICPBuf.size() > 30 ) {
                 RCLCPP_WARN(node->get_logger(), "Too many loop clousre candidates to be ICPed is waiting ... Do process_lcd less frequently (adjust loopClosureFrequency)");
             }
 
-            mBuf.lock(); 
             std::pair<int, int> loop_idx_pair = scLoopICPBuf.front();
             scLoopICPBuf.pop();
             mBuf.unlock(); 

@@ -70,6 +70,7 @@ target_link_libraries(alaserPGO
 )
 
 if(BUILD_TESTING)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_measurement_utils test/test_measurement_utils.cpp)
   target_include_directories(test_measurement_utils PRIVATE include)
@@ -88,6 +89,11 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/config/pgo_ros2.yaml
   )
   set_tests_properties(test_pgo_shutdown PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME test_bag_preflight
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/test_bag_preflight.py
+  )
 endif()
 
 install(TARGETS
@@ -104,6 +110,10 @@ install(DIRECTORY config launch rviz_cfg
 
 install(DIRECTORY include/
   DESTINATION include/${PROJECT_NAME}
+)
+
+install(PROGRAMS tools/bag_preflight.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 ament_package()
