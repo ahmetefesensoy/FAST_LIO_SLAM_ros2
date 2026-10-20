@@ -8,6 +8,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g")
 
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
@@ -59,7 +60,7 @@ add_executable(alaserPGO
   src/laserPosegraphOptimization.cpp
   include/scancontext/Scancontext.cpp
 )
-ament_target_dependencies(alaserPGO rclcpp rclpy std_msgs geometry_msgs nav_msgs sensor_msgs pcl_conversions tf2 tf2_ros tf2_geometry_msgs)
+ament_target_dependencies(alaserPGO rclcpp rclpy std_msgs geometry_msgs diagnostic_msgs nav_msgs sensor_msgs pcl_conversions tf2 tf2_ros tf2_geometry_msgs)
 target_compile_options(alaserPGO 
   PRIVATE ${OpenMP_CXX_FLAGS}
 )
@@ -89,6 +90,14 @@ if(BUILD_TESTING)
       ${CMAKE_CURRENT_SOURCE_DIR}/config/pgo_ros2.yaml
   )
   set_tests_properties(test_pgo_shutdown PROPERTIES TIMEOUT 20)
+  add_test(
+    NAME test_pgo_diagnostics
+    COMMAND ${BASH_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/run_diagnostics_smoke.sh
+      $<TARGET_FILE:alaserPGO>
+      ${CMAKE_CURRENT_SOURCE_DIR}/config/pgo_ros2.yaml
+  )
+  set_tests_properties(test_pgo_diagnostics PROPERTIES TIMEOUT 30)
   add_test(
     NAME test_bag_preflight
     COMMAND ${Python3_EXECUTABLE}

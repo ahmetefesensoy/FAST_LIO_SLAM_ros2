@@ -15,6 +15,7 @@
     optimized_map_topic: /aft_pgo_map
     loop_scan_topic: /loop_scan_local
     loop_submap_topic: /loop_submap_local
+    diagnostics_topic: /pgo/diagnostics
     use_gnss_position: true
     use_rtk_heading: true
     use_altitude_factor: false

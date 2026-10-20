@@ -64,6 +64,12 @@ Missing, empty, or wrong-type topics cause exit code 2, so the command can gate
 automated bag benchmarks. This check does not claim localization accuracy; ATE,
 RPE, CPU and memory require an actual recorded dataset and ground truth.
 
+During replay, `/pgo/diagnostics` publishes keyframe and graph-update counts,
+last iSAM2 update time in milliseconds, GNSS/heading accepted and rejected
+counts, accepted loop count, and measurement queue depths. Record this topic in
+benchmark bags so parameter sweeps can explain accuracy/runtime differences
+instead of comparing trajectories alone.
+
 The backend must be the only source of global correction when enabled. FAST-LIO
 continues to own the smooth local `odom -> base_link` transform while SC-PGO
 publishes only `map -> odom`.
