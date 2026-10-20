@@ -101,6 +101,7 @@ std::queue<std::pair<int, int> > scLoopICPBuf;
 
 std::mutex mBuf;
 std::mutex mKF;
+std::mutex mGlobalTransform;
 
 double timeLaserOdometry = 0.0;
 double timeLaser = 0.0;
@@ -161,6 +162,8 @@ bool gpsOffsetInitialized = false;
 double gpsAltitudeInitOffset = 0.0;
 double recentOptimizedX = 0.0;
 double recentOptimizedY = 0.0;
+gtsam::Pose3 mapToOdomEstimate;
+bool hasMapToOdomEstimate = false;
 
 std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::PointCloud2>> pubMapAftPGO, pubLoopScanLocal, pubLoopSubmapLocal;
 std::shared_ptr<rclcpp::Publisher<nav_msgs::msg::Odometry>>  pubOdomAftPGO, pubOdomRepubVerifier;
@@ -205,6 +208,14 @@ gtsam::Pose3 Pose6DtoGTSAMPose3(const Pose6D& p)
 {
     return gtsam::Pose3( gtsam::Rot3::RzRyRx(p.roll, p.pitch, p.yaw), gtsam::Point3(p.x, p.y, p.z) );
 } // Pose6DtoGTSAMPose3
+
+gtsam::Pose3 predictGlobalPose(const gtsam::Pose3& odom_T_base)
+{
+    std::lock_guard<std::mutex> lock(mGlobalTransform);
+    return hasMapToOdomEstimate
+        ? mapToOdomEstimate.compose(odom_T_base)
+        : odom_T_base;
+}
 
 void saveOdometryVerticesKITTIformat(std::string _filename)
 {
@@ -452,6 +463,21 @@ void updatePoses(void)
     recentOptimizedY = lastOptimizedPose.translation().y();
 
     recentIdxUpdated = int(keyframePosesUpdated.size()) - 1;
+
+    std::optional<gtsam::Pose3> localPose;
+    {
+        std::lock_guard<std::mutex> keyframe_lock(mKF);
+        if (recentIdxUpdated >= 0 &&
+            recentIdxUpdated < static_cast<int>(keyframePoses.size())) {
+            localPose = Pose6DtoGTSAMPose3(
+                keyframePoses.at(recentIdxUpdated));
+        }
+    }
+    if (localPose) {
+        std::lock_guard<std::mutex> global_lock(mGlobalTransform);
+        mapToOdomEstimate = pgo::mapToOdom(lastOptimizedPose, *localPose);
+        hasMapToOdomEstimate = true;
+    }
 
     mtxRecentPose.unlock();
 } // updatePoses
@@ -701,6 +727,13 @@ void process_pg()
                     poseOrigin = pgo::initializeGlobalPose(
                         poseOrigin, initialGnss, initialYaw, antennaInBase);
                 }
+                {
+                    std::lock_guard<std::mutex> global_lock(mGlobalTransform);
+                    mapToOdomEstimate = pgo::mapToOdom(
+                        poseOrigin,
+                        Pose6DtoGTSAMPose3(keyframePoses.at(init_node_idx)));
+                    hasMapToOdomEstimate = true;
+                }
                 // auto poseOrigin = gtsam::Pose3(gtsam::Rot3::RzRyRx(0.0, 0.0, 0.0), gtsam::Point3(0.0, 0.0, 0.0));
 
                 mtxPosegraph.lock();
@@ -716,13 +749,18 @@ void process_pg()
 
                 cout << "posegraph prior node " << init_node_idx << " added" << endl;
             } else /* consecutive node (and odom factor) after the prior added */ { // == keyframePoses.size() > 1 
-                gtsam::Pose3 poseFrom = Pose6DtoGTSAMPose3(keyframePoses.at(prev_node_idx));
-                gtsam::Pose3 poseTo = Pose6DtoGTSAMPose3(keyframePoses.at(curr_node_idx));
+                const gtsam::Pose3 localPoseFrom =
+                    Pose6DtoGTSAMPose3(keyframePoses.at(prev_node_idx));
+                const gtsam::Pose3 localPoseTo =
+                    Pose6DtoGTSAMPose3(keyframePoses.at(curr_node_idx));
+                const gtsam::Pose3 poseTo = predictGlobalPose(localPoseTo);
 
                 mtxPosegraph.lock();
                 {
                     // odom factor
-                    gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(prev_node_idx, curr_node_idx, poseFrom.between(poseTo), odomNoise));
+                    gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+                        prev_node_idx, curr_node_idx,
+                        localPoseFrom.between(localPoseTo), odomNoise));
 
                     if(hasGnssForThisKF && useGnssPosition) {
                         const auto& covariance = currGnss->pose.covariance;

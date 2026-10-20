@@ -57,4 +57,22 @@ TEST(PgoTransforms, KeepsLocalPoseWithoutAbsoluteMeasurements) {
           .equals(local_pose, 1e-9));
 }
 
+TEST(PgoTransforms, AppliesInitialGlobalDatumToLaterLocalPose) {
+  const gtsam::Pose3 initial_local(
+      gtsam::Rot3::RzRyRx(0.0, 0.0, 0.2),
+      gtsam::Point3(0.0, 0.0, 0.0));
+  const gtsam::Pose3 initial_global(
+      gtsam::Rot3::RzRyRx(0.0, 0.0, 0.2),
+      gtsam::Point3(100.0, 200.0, 0.0));
+  const gtsam::Pose3 later_local(
+      gtsam::Rot3::RzRyRx(0.0, 0.0, 0.2),
+      gtsam::Point3(5.0, -2.0, 0.0));
+
+  const gtsam::Pose3 predicted_global =
+      pgo::mapToOdom(initial_global, initial_local).compose(later_local);
+
+  EXPECT_NEAR(predicted_global.translation().x(), 105.0, 1e-9);
+  EXPECT_NEAR(predicted_global.translation().y(), 198.0, 1e-9);
+}
+
 }  // namespace
