@@ -71,6 +71,7 @@
 #include "pgo/factors.hpp"
 #include "pgo/measurement_utils.hpp"
 #include "pgo/transforms.hpp"
+#include "pgo/runtime_metrics.hpp"
 
 using namespace gtsam;
 
@@ -183,6 +184,7 @@ std::shared_ptr<rclcpp::Publisher<nav_msgs::msg::Path>> pubPathAftPGO;
 std::shared_ptr<rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>> pubDiagnostics;
 
 std::string save_directory;
+std::string metricsOutputPath;
 std::string pgKITTIformat, pgScansDirectory;
 std::string odomKITTIformat;
 std::fstream pgTimeSaveStream;
@@ -277,6 +279,29 @@ void publishDiagnostics()
     };
     message.status.push_back(status);
     pubDiagnostics->publish(message);
+}
+
+void writeFinalMetrics()
+{
+    if (metricsOutputPath.empty()) {
+        return;
+    }
+    const std::filesystem::path outputPath(metricsOutputPath);
+    if (outputPath.has_parent_path()) {
+        std::filesystem::create_directories(outputPath.parent_path());
+    }
+    const pgo::RuntimeMetrics metrics{
+        static_cast<uint64_t>(keyframePoses.size()),
+        graphUpdates.load(),
+        gnssAccepted.load(),
+        gnssRejected.load(),
+        headingAccepted.load(),
+        headingRejected.load(),
+        loopsAccepted.load(),
+        lastGraphUpdateMs.load(),
+    };
+    std::ofstream output(outputPath);
+    output << pgo::renderRuntimeMetricsJson(metrics);
 }
 
 void saveOdometryVerticesKITTIformat(std::string _filename)
@@ -1093,6 +1118,8 @@ int main(int argc, char **argv)
     std::filesystem::remove_all(scansPath);
     std::filesystem::create_directories(scansPath);
     pgScansDirectory = scansPath.string() + "/";
+  node->declare_parameter("metrics_output_path", "");
+  metricsOutputPath = node->get_parameter("metrics_output_path").as_string();
 
   node->declare_parameter("keyframe_meter_gap", 2.0); // pose assignment every k m move 
   keyframeMeterGap = node->get_parameter("keyframe_meter_gap").get_parameter_value().get<double>();
@@ -1223,6 +1250,8 @@ int main(int argc, char **argv)
 	isam_update.join();
 	viz_map.join();
 	viz_path.join();
+
+	writeFinalMetrics();
 
 	subLaserCloudFullRes.reset();
 	subLaserOdometry.reset();

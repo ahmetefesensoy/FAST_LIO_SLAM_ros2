@@ -81,6 +81,8 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pgo_transforms test/test_pgo_transforms.cpp)
   target_include_directories(test_pgo_transforms PRIVATE include)
   target_link_libraries(test_pgo_transforms gtsam)
+  ament_add_gtest(test_pgo_metrics test/test_pgo_metrics.cpp)
+  target_include_directories(test_pgo_metrics PRIVATE include)
   find_program(BASH_EXECUTABLE bash REQUIRED)
   add_test(
     NAME test_pgo_shutdown
@@ -99,9 +101,22 @@ if(BUILD_TESTING)
   )
   set_tests_properties(test_pgo_diagnostics PROPERTIES TIMEOUT 30)
   add_test(
+    NAME test_pgo_metrics_output
+    COMMAND ${BASH_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/run_metrics_output_smoke.sh
+      $<TARGET_FILE:alaserPGO>
+      ${CMAKE_CURRENT_SOURCE_DIR}/config/pgo_ros2.yaml
+  )
+  set_tests_properties(test_pgo_metrics_output PROPERTIES TIMEOUT 20)
+  add_test(
     NAME test_bag_preflight
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/test/test_bag_preflight.py
+  )
+  add_test(
+    NAME test_bag_benchmark
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/test_benchmark_runner.py
   )
 endif()
 
@@ -121,7 +136,9 @@ install(DIRECTORY include/
   DESTINATION include/${PROJECT_NAME}
 )
 
-install(PROGRAMS tools/bag_preflight.py
+install(PROGRAMS
+  tools/bag_preflight.py
+  tools/run_bag_benchmark.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

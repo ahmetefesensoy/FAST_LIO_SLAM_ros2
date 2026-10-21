@@ -70,6 +70,21 @@ counts, accepted loop count, and measurement queue depths. Record this topic in
 benchmark bags so parameter sweeps can explain accuracy/runtime differences
 instead of comparing trajectories alone.
 
+Run the reproducible keyframe sweep after preflight succeeds:
+
+```bash
+ros2 run aloam_velodyne run_bag_benchmark.py /path/to/pgo_input_bag \
+  --output /tmp/pgo_benchmark
+```
+
+The runner executes isolated `0.5`, `1.0`, and `2.0` metre keyframe runs,
+records optimized odometry, diagnostics and TF, samples PGO CPU/RSS, and writes
+`benchmark_report.json` plus `benchmark_summary.csv`. Use `--dry-run` to inspect
+the exact commands without starting ROS processes. Each PGO process also writes
+its final factor counters to `pgo_metrics.json`. ATE/RPE stays explicitly marked
+`not_computed` until a ground-truth trajectory is supplied; resource or factor
+metrics are never presented as localization accuracy.
+
 The backend must be the only source of global correction when enabled. FAST-LIO
 continues to own the smooth local `odom -> base_link` transform while SC-PGO
 publishes only `map -> odom`.
