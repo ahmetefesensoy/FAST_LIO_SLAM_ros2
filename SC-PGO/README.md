@@ -2,6 +2,10 @@
 
 ## ROS 2 Humble: FAST-LIO + GNSS + RTK heading
 
+Run the Scan Context pose-graph backend as `ros2 run aloam_velodyne sc_pgo`.
+The legacy executable name `alaserPGO` remains installed as a compatibility
+alias for older launch files; both names execute the same binary.
+
 This branch keeps the original Scan Context/iSAM2 backend and adds a ROS 2
 Humble integration for a FAST-LIO frontend.
 

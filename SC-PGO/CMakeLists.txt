@@ -56,18 +56,28 @@ add_executable(alaserMapping src/laserMapping.cpp)
 ament_target_dependencies(alaserMapping rclcpp rclpy std_msgs geometry_msgs nav_msgs sensor_msgs pcl_conversions tf2 tf2_ros)
 target_link_libraries(alaserMapping ${PCL_LIBRARIES} ${CERES_LIBRARIES})
 
-add_executable(alaserPGO 
+set(SC_PGO_SOURCES
   src/laserPosegraphOptimization.cpp
   include/scancontext/Scancontext.cpp
 )
-ament_target_dependencies(alaserPGO rclcpp rclpy std_msgs geometry_msgs diagnostic_msgs nav_msgs sensor_msgs pcl_conversions tf2 tf2_ros tf2_geometry_msgs)
-target_compile_options(alaserPGO 
-  PRIVATE ${OpenMP_CXX_FLAGS}
-)
-target_link_libraries(alaserPGO 
+
+add_executable(sc_pgo ${SC_PGO_SOURCES})
+ament_target_dependencies(sc_pgo rclcpp rclpy std_msgs geometry_msgs diagnostic_msgs nav_msgs sensor_msgs pcl_conversions tf2 tf2_ros tf2_geometry_msgs)
+target_compile_options(sc_pgo PRIVATE ${OpenMP_CXX_FLAGS})
+target_link_libraries(sc_pgo
   ${PCL_LIBRARIES} ${CERES_LIBRARIES}
   ${OpenMP_CXX_FLAGS}
   gtsam
+)
+
+# Preserve the legacy ROS executable name without compiling the large PGO
+# translation unit twice.
+set(LEGACY_PGO_EXECUTABLE "${CMAKE_CURRENT_BINARY_DIR}/alaserPGO${CMAKE_EXECUTABLE_SUFFIX}")
+add_custom_command(TARGET sc_pgo POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:sc_pgo>
+    ${LEGACY_PGO_EXECUTABLE}
+  BYPRODUCTS ${LEGACY_PGO_EXECUTABLE}
 )
 
 if(BUILD_TESTING)
@@ -88,7 +98,7 @@ if(BUILD_TESTING)
     NAME test_pgo_shutdown
     COMMAND ${BASH_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/test/run_shutdown_smoke.sh
-      $<TARGET_FILE:alaserPGO>
+      $<TARGET_FILE:sc_pgo>
       ${CMAKE_CURRENT_SOURCE_DIR}/config/pgo_ros2.yaml
   )
   set_tests_properties(test_pgo_shutdown PROPERTIES TIMEOUT 20)
@@ -96,7 +106,7 @@ if(BUILD_TESTING)
     NAME test_pgo_diagnostics
     COMMAND ${BASH_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/test/run_diagnostics_smoke.sh
-      $<TARGET_FILE:alaserPGO>
+      $<TARGET_FILE:sc_pgo>
       ${CMAKE_CURRENT_SOURCE_DIR}/config/pgo_ros2.yaml
   )
   set_tests_properties(test_pgo_diagnostics PROPERTIES TIMEOUT 30)
@@ -104,7 +114,7 @@ if(BUILD_TESTING)
     NAME test_pgo_metrics_output
     COMMAND ${BASH_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/test/run_metrics_output_smoke.sh
-      $<TARGET_FILE:alaserPGO>
+      $<TARGET_FILE:sc_pgo>
       ${CMAKE_CURRENT_SOURCE_DIR}/config/pgo_ros2.yaml
   )
   set_tests_properties(test_pgo_metrics_output PROPERTIES TIMEOUT 20)
@@ -124,7 +134,11 @@ install(TARGETS
   ascanRegistration
   alaserOdometry
   alaserMapping
-  alaserPGO
+  sc_pgo
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(PROGRAMS ${LEGACY_PGO_EXECUTABLE}
   DESTINATION lib/${PROJECT_NAME}
 )
 

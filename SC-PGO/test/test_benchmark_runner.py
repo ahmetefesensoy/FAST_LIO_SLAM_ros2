@@ -26,6 +26,7 @@ class BenchmarkRunnerTest(unittest.TestCase):
             )
 
         self.assertEqual([run["keyframe_meter_gap"] for run in plan], [0.5, 1.0, 2.0])
+        self.assertTrue(all(run["pgo_argv"][3] == "sc_pgo" for run in plan))
         self.assertEqual(plan[0]["name"], "keyframe_0p5m")
         self.assertEqual(plan[2]["name"], "keyframe_2m")
         self.assertIn("keyframe_meter_gap:=1.0", plan[1]["pgo_command"])

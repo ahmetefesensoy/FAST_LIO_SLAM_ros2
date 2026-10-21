@@ -12,7 +12,7 @@ def generate_launch_description():
         [
             Node(
                 package="aloam_velodyne",
-                executable="alaserPGO",
+                executable="sc_pgo",
                 name="laser_pgo",
                 output="screen",
                 parameters=[params_file],

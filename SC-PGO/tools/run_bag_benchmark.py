@@ -38,7 +38,7 @@ def create_plan(bag: Path, output: Path, params_file: Path, gaps: list[float]) -
         metrics = run_dir / "pgo_metrics.json"
         telemetry = run_dir / "telemetry"
         pgo_argv = [
-            "ros2", "run", "aloam_velodyne", "alaserPGO", "--ros-args",
+            "ros2", "run", "aloam_velodyne", "sc_pgo", "--ros-args",
             "--params-file", str(params_file),
             "-p", f"keyframe_meter_gap:={gap}",
             "-p", "use_sim_time:=true",
