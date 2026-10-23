@@ -1,6 +1,7 @@
 #include <fstream>
 #include <math.h>
 #include <vector>
+#include <deque>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -70,6 +71,7 @@
 #include "scancontext/Scancontext.h"
 #include "pgo/factors.hpp"
 #include "pgo/measurement_utils.hpp"
+#include "pgo/measurement_sync.hpp"
 #include "pgo/transforms.hpp"
 #include "pgo/runtime_metrics.hpp"
 
@@ -101,8 +103,8 @@ Pose6D odom_pose_curr {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // init pose is zero
 
 std::queue<nav_msgs::msg::Odometry::ConstSharedPtr> odometryBuf;
 std::queue<sensor_msgs::msg::PointCloud2::ConstSharedPtr> fullResBuf;
-std::queue<nav_msgs::msg::Odometry::ConstSharedPtr> gnssBuf;
-std::queue<geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr> headingBuf;
+std::deque<nav_msgs::msg::Odometry::ConstSharedPtr> gnssBuf;
+std::deque<geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr> headingBuf;
 std::queue<std::pair<int, int> > scLoopICPBuf;
 
 std::mutex mBuf;
@@ -148,7 +150,8 @@ bool laserCloudMapPGORedraw = true;
 bool useGnssPosition = true;
 bool useRtkHeading = true;
 bool useAltitudeFactor = false;
-double measurementTimeTolerance = 0.2;
+double measurementMaxPastAge = 0.25;
+double measurementMaxFutureLead = 0.03;
 double gnssMahalanobisThreshold = 9.21;
 double headingMahalanobisThreshold = 9.0;
 double antennaYawOffset = 0.0;
@@ -175,6 +178,12 @@ std::atomic<uint64_t> gnssRejected{0};
 std::atomic<uint64_t> headingAccepted{0};
 std::atomic<uint64_t> headingRejected{0};
 std::atomic<uint64_t> loopsAccepted{0};
+std::atomic<uint64_t> gnssStaleDropped{0};
+std::atomic<uint64_t> headingStaleDropped{0};
+std::atomic<uint64_t> gnssFutureDeferred{0};
+std::atomic<uint64_t> headingFutureDeferred{0};
+std::atomic<double> lastGnssSkewS{0.0};
+std::atomic<double> lastHeadingSkewS{0.0};
 std::atomic<uint64_t> graphUpdates{0};
 std::atomic<double> lastGraphUpdateMs{0.0};
 
@@ -196,21 +205,43 @@ double toSec(const builtin_interfaces::msg::Time& stamp) {
 }
 
 template <typename MessageT>
-typename MessageT::ConstSharedPtr popNearestMeasurement(
-    std::queue<typename MessageT::ConstSharedPtr>& buffer,
+struct SynchronizedMeasurement {
+  typename MessageT::ConstSharedPtr message;
+  std::size_t stale_dropped{0};
+  bool future_deferred{false};
+  double skew_s{0.0};
+};
+
+template <typename MessageT>
+SynchronizedMeasurement<MessageT> popNearestMeasurement(
+    std::deque<typename MessageT::ConstSharedPtr>& buffer,
     double target_time,
-    double tolerance) {
-  while (!buffer.empty() &&
-         toSec(buffer.front()->header.stamp) < target_time - tolerance) {
-    buffer.pop();
+    double max_past_age,
+    double max_future_lead) {
+  std::vector<double> stamps;
+  stamps.reserve(buffer.size());
+  for (const auto& message : buffer) {
+    stamps.push_back(toSec(message->header.stamp));
   }
-  if (buffer.empty() ||
-      std::abs(toSec(buffer.front()->header.stamp) - target_time) > tolerance) {
-    return nullptr;
+  const auto selection = pgo::selectMeasurement(
+      stamps, target_time, max_past_age, max_future_lead);
+  SynchronizedMeasurement<MessageT> result;
+  result.stale_dropped = selection.stale_prefix;
+  result.future_deferred = selection.future_only;
+  for (std::size_t index = 0; index < selection.stale_prefix; ++index) {
+    buffer.pop_front();
   }
-  auto measurement = buffer.front();
-  buffer.pop();
-  return measurement;
+  if (!selection.index.has_value()) {
+    return result;
+  }
+  const std::size_t adjusted_index = *selection.index - selection.stale_prefix;
+  for (std::size_t index = 0; index < adjusted_index; ++index) {
+    buffer.pop_front();
+  }
+  result.message = buffer.front();
+  result.skew_s = selection.skew_s;
+  buffer.pop_front();
+  return result;
 }
 
 std::string padZeros(int val, int num_digits = 6) {
@@ -274,6 +305,12 @@ void publishDiagnostics()
         diagnosticValue("heading_accepted", std::to_string(headingAccepted.load())),
         diagnosticValue("heading_rejected", std::to_string(headingRejected.load())),
         diagnosticValue("loops_accepted", std::to_string(loopsAccepted.load())),
+        diagnosticValue("gnss_stale_dropped", std::to_string(gnssStaleDropped.load())),
+        diagnosticValue("heading_stale_dropped", std::to_string(headingStaleDropped.load())),
+        diagnosticValue("gnss_future_deferred", std::to_string(gnssFutureDeferred.load())),
+        diagnosticValue("heading_future_deferred", std::to_string(headingFutureDeferred.load())),
+        diagnosticValue("gnss_skew_s_last", std::to_string(lastGnssSkewS.load())),
+        diagnosticValue("heading_skew_s_last", std::to_string(lastHeadingSkewS.load())),
         diagnosticValue("gnss_queue_depth", std::to_string(gnssQueueDepth)),
         diagnosticValue("heading_queue_depth", std::to_string(headingQueueDepth)),
     };
@@ -298,6 +335,12 @@ void writeFinalMetrics()
         headingAccepted.load(),
         headingRejected.load(),
         loopsAccepted.load(),
+        gnssStaleDropped.load(),
+        headingStaleDropped.load(),
+        gnssFutureDeferred.load(),
+        headingFutureDeferred.load(),
+        lastGnssSkewS.load(),
+        lastHeadingSkewS.load(),
         lastGraphUpdateMs.load(),
     };
     std::ofstream output(outputPath);
@@ -365,8 +408,8 @@ void gnssHandler(const nav_msgs::msg::Odometry::ConstSharedPtr gnss)
 {
     if(useGnssPosition || useAltitudeFactor) {
         mBuf.lock();
-        gnssBuf.push(gnss);
-        while (gnssBuf.size() > 1000) gnssBuf.pop();
+        gnssBuf.push_back(gnss);
+        while (gnssBuf.size() > 1000) gnssBuf.pop_front();
         mBuf.unlock();
     }
 }
@@ -376,8 +419,8 @@ void headingHandler(
 {
     if(useRtkHeading) {
         mBuf.lock();
-        headingBuf.push(heading);
-        while (headingBuf.size() > 1000) headingBuf.pop();
+        headingBuf.push_back(heading);
+        while (headingBuf.size() > 1000) headingBuf.pop_front();
         mBuf.unlock();
     }
 }
@@ -721,11 +764,21 @@ void process_pg()
             Pose6D pose_curr = getOdom(odometryBuf.front());
             odometryBuf.pop();
 
-            currGnss = popNearestMeasurement<nav_msgs::msg::Odometry>(
-                gnssBuf, timeLaserOdometry, measurementTimeTolerance);
-            currHeading =
+            const auto gnssMatch = popNearestMeasurement<nav_msgs::msg::Odometry>(
+                gnssBuf, timeLaserOdometry,
+                measurementMaxPastAge, measurementMaxFutureLead);
+            const auto headingMatch =
                 popNearestMeasurement<geometry_msgs::msg::PoseWithCovarianceStamped>(
-                    headingBuf, timeLaserOdometry, measurementTimeTolerance);
+                    headingBuf, timeLaserOdometry,
+                    measurementMaxPastAge, measurementMaxFutureLead);
+            currGnss = gnssMatch.message;
+            currHeading = headingMatch.message;
+            gnssStaleDropped += gnssMatch.stale_dropped;
+            headingStaleDropped += headingMatch.stale_dropped;
+            if (gnssMatch.future_deferred) ++gnssFutureDeferred;
+            if (headingMatch.future_deferred) ++headingFutureDeferred;
+            if (currGnss) lastGnssSkewS = gnssMatch.skew_s;
+            if (currHeading) lastHeadingSkewS = headingMatch.skew_s;
             hasGnssForThisKF = static_cast<bool>(currGnss);
             hasHeadingForThisKF = static_cast<bool>(currHeading);
             mBuf.unlock(); 
@@ -1156,9 +1209,12 @@ int main(int argc, char **argv)
   useRtkHeading = node->get_parameter("use_rtk_heading").as_bool();
   node->declare_parameter("use_altitude_factor", false);
   useAltitudeFactor = node->get_parameter("use_altitude_factor").as_bool();
-  node->declare_parameter("measurement_time_tolerance", 0.2);
-  measurementTimeTolerance =
-      node->get_parameter("measurement_time_tolerance").as_double();
+  node->declare_parameter("measurement_max_past_age", 0.25);
+  measurementMaxPastAge =
+      node->get_parameter("measurement_max_past_age").as_double();
+  node->declare_parameter("measurement_max_future_lead", 0.03);
+  measurementMaxFutureLead =
+      node->get_parameter("measurement_max_future_lead").as_double();
   node->declare_parameter("gnss_mahalanobis_threshold", 9.21);
   gnssMahalanobisThreshold =
       node->get_parameter("gnss_mahalanobis_threshold").as_double();

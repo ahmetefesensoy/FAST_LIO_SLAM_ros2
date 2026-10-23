@@ -20,7 +20,8 @@
     use_gnss_position: true
     use_rtk_heading: true
     use_altitude_factor: false
-    measurement_time_tolerance: 0.2
+    measurement_max_past_age: 0.25
+    measurement_max_future_lead: 0.03
     gnss_mahalanobis_threshold: 9.21
     heading_mahalanobis_threshold: 9.0
     heading_is_north_clockwise: false

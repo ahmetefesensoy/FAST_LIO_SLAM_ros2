@@ -31,6 +31,12 @@ Mahalanobis threshold, and yaw innovations above their threshold are rejected.
 Set `heading_is_north_clockwise:=true` only when the input quaternion encodes a
 north-zero, clockwise-positive vendor heading rather than normalized ENU yaw.
 The conversion also supports antenna yaw offset and meridian convergence.
+
+Measurements are associated by sensor timestamp. `measurement_max_past_age`
+allows bounded delayed GNSS/RTK data, while `measurement_max_future_lead` is kept
+small so a future observation is not attached to the wrong keyframe. The closest
+candidate is selected; stale drops, future deferrals and last selected skew are
+reported in `/pgo/diagnostics` and the final metrics JSON.
 Set `antenna_offset_{x,y,z}` to the GNSS antenna origin expressed in
 `base_frame`; the X/Y factor rotates this 3D lever arm with the estimated rover
 attitude. With `initialize_from_absolute_measurements:=true`, the first valid
